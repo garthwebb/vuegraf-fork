@@ -320,204 +320,251 @@ def extractDataPoints(device, usageDataPoints, pointType=None, historyStartTime=
                 usageDataPoints.append(createDataPoint(accountName, deviceName, chanName, watts, timestamp, tagValue_day))
                 index += 1
 
-startupTime = datetime.datetime.now(datetime.UTC).replace(microsecond=0)
-try:
-    #argparse includes default -h / --help as command line input
-    parser = argparse.ArgumentParser(
-        prog='vuegraf.py',
-        description='Veugraf retrieves energy usage data from commerical cloud servers and inserts it into a self-hosted InfluxDB database.',
-        epilog='For more information visit: ' + __github__
-        )
-    parser.add_argument(
-        'configFilename',
-        help='JSON config file',
-        type=str
-        )
-    parser.add_argument(
-        '-v',
-        '--verbose',
-        help='Verbose output - shows additional collection information',
-        action='store_true')
-    parser.add_argument(
-        '-d',
-        '--debug',
-        help='Debug output - shows all point data being collected and written to the DB (can be thousands of lines of output)',
-        action='store_true')
-    parser.add_argument(
-        '--historydays',
-        help='Starts execution by pulling history of Hours and Day data for specified number of days.  example: --historydays 60',
-        type=int,
-        default=0
-        )
-    parser.add_argument(
-        '--resetdatabase',
-        action='store_true',
-        default=False,
-        help='Drop database and create a new one. USE WITH CAUTION - WILL RESULT IN COMPLETE VUEGRAF DATA LOSS!')
-    parser.add_argument(
-        '--dryrun',
-        help='Read from the API and process the data, but do not write to influxdb',
-        action='store_true',
-        default=False
-        )
-    args = parser.parse_args()
-    info('Starting Vuegraf version {}'.format(__version__))
+args = None
+pauseEvent = None
+config = None
+influxVersion = None
+tagName = None
+tagValue_second = None
+tagValue_minute = None
+tagValue_hour = None
+tagValue_day = None
+bucket = None
+write_api = None
+query_api = None
+sslVerify = None
+running = None
+lagSecs = None
+accountTimeZoneName = None
+accountTimeZone = None
+detailedStartTime = None
+pastDay = None
+historyDays = None
+history = None
+intervalSecs = None
+detailedIntervalSecs = None
+detailedDataEnabled = None
+detailedSecondsEnabled = None
+detailedHoursEnabled = None
+maxHistoryDays = None
 
-    config = {}
-    with open(args.configFilename) as configFile:
-        config = json.load(configFile)
 
-    influxVersion = 1
-    if 'version' in config['influxDb']:
-        influxVersion = config['influxDb']['version']
+def main():
+    startupTime = datetime.datetime.now(datetime.UTC).replace(microsecond=0)
+    try:
+        #argparse includes default -h / --help as command line input
+        parser = argparse.ArgumentParser(
+            prog='vuegraf.py',
+            description='Veugraf retrieves energy usage data from commerical cloud servers and inserts it into a self-hosted InfluxDB database.',
+            epilog='For more information visit: ' + __github__
+            )
+        parser.add_argument(
+            'configFilename',
+            help='JSON config file',
+            type=str
+            )
+        parser.add_argument(
+            '-v',
+            '--verbose',
+            help='Verbose output - shows additional collection information',
+            action='store_true')
+        parser.add_argument(
+            '-d',
+            '--debug',
+            help='Debug output - shows all point data being collected and written to the DB (can be thousands of lines of output)',
+            action='store_true')
+        parser.add_argument(
+            '--historydays',
+            help='Starts execution by pulling history of Hours and Day data for specified number of days.  example: --historydays 60',
+            type=int,
+            default=0
+            )
+        parser.add_argument(
+            '--resetdatabase',
+            action='store_true',
+            default=False,
+            help='Drop database and create a new one. USE WITH CAUTION - WILL RESULT IN COMPLETE VUEGRAF DATA LOSS!')
+        parser.add_argument(
+            '--dryrun',
+            help='Read from the API and process the data, but do not write to influxdb',
+            action='store_true',
+            default=False
+            )
+        args = parser.parse_args()
+        info('Starting Vuegraf version {}'.format(__version__))
 
-    bucket = ''
-    write_api = None
-    query_api = None
-    sslVerify = True
+        config = {}
+        with open(args.configFilename) as configFile:
+            config = json.load(configFile)
 
-    if 'ssl_verify' in config['influxDb']:
-        sslVerify = config['influxDb']['ssl_verify']
+        influxVersion = 1
+        if 'version' in config['influxDb']:
+            influxVersion = config['influxDb']['version']
 
-    if influxVersion == 2:
-        info('Using InfluxDB version 2')
-        bucket = config['influxDb']['bucket']
-        org = config['influxDb']['org']
-        token = config['influxDb']['token']
-        url= config['influxDb']['url']
-        influx2 = influxdb_client.InfluxDBClient(
-           url=url,
-           token=token,
-           org=org,
-           verify_ssl=sslVerify
-        )
-        write_api = influx2.write_api(write_options=influxdb_client.client.write_api.SYNCHRONOUS)
-        query_api = influx2.query_api()
+        bucket = ''
+        write_api = None
+        query_api = None
+        sslVerify = True
 
-        if args.resetdatabase:
-            info('Resetting database')
-            delete_api = influx2.delete_api()
-            start = '1970-01-01T00:00:00Z'
-            stop = startupTime.isoformat(timespec='seconds').replace("+00:00", "") + 'Z'
-            delete_api.delete(start, stop, '_measurement="energy_usage"', bucket=bucket, org=org)
-    else:
-        info('Using InfluxDB version 1')
+        if 'ssl_verify' in config['influxDb']:
+            sslVerify = config['influxDb']['ssl_verify']
 
-        sslEnable = False
-        if 'ssl_enable' in config['influxDb']:
-            sslEnable = config['influxDb']['ssl_enable']
+        if influxVersion == 2:
+            info('Using InfluxDB version 2')
+            bucket = config['influxDb']['bucket']
+            org = config['influxDb']['org']
+            token = config['influxDb']['token']
+            url= config['influxDb']['url']
+            influx2 = influxdb_client.InfluxDBClient(
+            url=url,
+            token=token,
+            org=org,
+            verify_ssl=sslVerify
+            )
+            write_api = influx2.write_api(write_options=influxdb_client.client.write_api.SYNCHRONOUS)
+            query_api = influx2.query_api()
 
-        # Only authenticate to ingress if 'user' entry was provided in config
-        if 'user' in config['influxDb']:
-            influx = influxdb.InfluxDBClient(host=config['influxDb']['host'], port=config['influxDb']['port'], username=config['influxDb']['user'], password=config['influxDb']['pass'], database=config['influxDb']['database'], ssl=sslEnable, verify_ssl=sslVerify)
+            if args.resetdatabase:
+                info('Resetting database')
+                delete_api = influx2.delete_api()
+                start = '1970-01-01T00:00:00Z'
+                stop = startupTime.isoformat(timespec='seconds').replace("+00:00", "") + 'Z'
+                delete_api.delete(start, stop, '_measurement="energy_usage"', bucket=bucket, org=org)
         else:
-            influx = influxdb.InfluxDBClient(host=config['influxDb']['host'], port=config['influxDb']['port'], database=config['influxDb']['database'], ssl=sslEnable, verify_ssl=sslVerify)
+            info('Using InfluxDB version 1')
 
-        influx.create_database(config['influxDb']['database'])
+            sslEnable = False
+            if 'ssl_enable' in config['influxDb']:
+                sslEnable = config['influxDb']['ssl_enable']
 
-        if args.resetdatabase:
-            info('Resetting database')
-            influx.delete_series(measurement='energy_usage')
+            # Only authenticate to ingress if 'user' entry was provided in config
+            if 'user' in config['influxDb']:
+                influx = influxdb.InfluxDBClient(host=config['influxDb']['host'], port=config['influxDb']['port'], username=config['influxDb']['user'], password=config['influxDb']['pass'], database=config['influxDb']['database'], ssl=sslEnable, verify_ssl=sslVerify)
+            else:
+                influx = influxdb.InfluxDBClient(host=config['influxDb']['host'], port=config['influxDb']['port'], database=config['influxDb']['database'], ssl=sslEnable, verify_ssl=sslVerify)
 
-    # Get Influx Tag information
-    tagName = 'detailed'
-    if 'tagName' in config['influxDb']:
-        tagName = config['influxDb']['tagName']
-    tagValue_second = 'True'
-    if 'tagValue_second' in config['influxDb']:
-        tagValue_second = config['influxDb']['tagValue_second']
-    tagValue_minute = 'False'
-    if 'tagValue_minute' in config['influxDb']:
-        tagValue_minute = config['influxDb']['tagValue_minute']
-    tagValue_hour = 'Hour'
-    if 'tagValue_hour' in config['influxDb']:
-        tagValue_hour = config['influxDb']['tagValue_hour']
-    tagValue_day = 'Day'
-    if 'tagValue_day' in config['influxDb']:
-        tagValue_day = config['influxDb']['tagValue_day']
-        
-    maxHistoryDays = getConfigValue('maxHistoryDays', 720)
-    historyDays = min(args.historydays, maxHistoryDays)
-    history = historyDays > 0
-    running = True
-    signal.signal(signal.SIGINT, handleExit)
-    signal.signal(signal.SIGHUP, handleExit)
-    pauseEvent = Event()
-    intervalSecs = getConfigValue('updateIntervalSecs', 60)
-    detailedIntervalSecs = getConfigValue('detailedIntervalSecs', 3600)
-    detailedDataEnabled = getConfigValue('detailedDataEnabled', False)
-    detailedSecondsEnabled = detailedDataEnabled and getConfigValue('detailedDataSecondsEnabled', True)
-    detailedHoursEnabled = detailedDataEnabled and getConfigValue('detailedDataHoursEnabled', True)
-    info('Settings -> updateIntervalSecs: {}, detailedDataEnabled: {}, detailedIntervalSecs: {}, detailedDataHoursEnabled: {}, detailedDataSecondsEnabled: {}'.format(intervalSecs, detailedDataEnabled, detailedIntervalSecs, detailedHoursEnabled, detailedSecondsEnabled))
-    info('Settings -> historyDays: {}, maxHistoryDays: {}'.format(historyDays, maxHistoryDays))    
-    lagSecs = getConfigValue('lagSecs', 5)
-    accountTimeZoneName = getConfigValue('timezone', None)
-    accountTimeZone = pytz.timezone(accountTimeZoneName) if accountTimeZoneName is not None and accountTimeZoneName.upper() != "TZ" else None
-    info('Settings -> timezone: {}'.format(accountTimeZone))
-    detailedStartTime = startupTime
-    pastDay = datetime.datetime.now(accountTimeZone)
-    pastDay = pastDay.replace(hour=23, minute=59, second=59, microsecond=0)
-    historyrun = history
+            influx.create_database(config['influxDb']['database'])
 
-    while running:
-        usageDataPoints = []
-        now = datetime.datetime.now(datetime.UTC).replace(microsecond=0)
-        curDay = datetime.datetime.now(accountTimeZone)
-        stopTime = now - datetime.timedelta(seconds=lagSecs)
-        secondsSinceLastDetailCollection = (stopTime - detailedStartTime).total_seconds()
-        collectDetails = detailedDataEnabled and detailedIntervalSecs > 0 and secondsSinceLastDetailCollection >= detailedIntervalSecs
-        verbose('Starting next event collection; collectDetails={}; secondsSinceLastDetailCollection={}; detailedIntervalSecs={}'.format(collectDetails, secondsSinceLastDetailCollection, detailedIntervalSecs))
+            if args.resetdatabase:
+                info('Resetting database')
+                influx.delete_series(measurement='energy_usage')
 
-        for account in config['accounts']:
-            if 'vue' not in account:
-                account['vue'] = PyEmVue()
-                account['vue'].login(username=account['email'], password=account['password'])
-                info('Login completed')
-                populateDevices(account)
+        # Get Influx Tag information
+        tagName = 'detailed'
+        if 'tagName' in config['influxDb']:
+            tagName = config['influxDb']['tagName']
+        tagValue_second = 'True'
+        if 'tagValue_second' in config['influxDb']:
+            tagValue_second = config['influxDb']['tagValue_second']
+        tagValue_minute = 'False'
+        if 'tagValue_minute' in config['influxDb']:
+            tagValue_minute = config['influxDb']['tagValue_minute']
+        tagValue_hour = 'Hour'
+        if 'tagValue_hour' in config['influxDb']:
+            tagValue_hour = config['influxDb']['tagValue_hour']
+        tagValue_day = 'Day'
+        if 'tagValue_day' in config['influxDb']:
+            tagValue_day = config['influxDb']['tagValue_day']
+            
+        maxHistoryDays = getConfigValue('maxHistoryDays', 720)
+        historyDays = min(args.historydays, maxHistoryDays)
+        history = historyDays > 0
+        running = True
+        signal.signal(signal.SIGINT, handleExit)
+        signal.signal(signal.SIGHUP, handleExit)
+        pauseEvent = Event()
+        intervalSecs = getConfigValue('updateIntervalSecs', 60)
+        detailedIntervalSecs = getConfigValue('detailedIntervalSecs', 3600)
+        detailedDataEnabled = getConfigValue('detailedDataEnabled', False)
+        detailedSecondsEnabled = detailedDataEnabled and getConfigValue('detailedDataSecondsEnabled', True)
+        detailedHoursEnabled = detailedDataEnabled and getConfigValue('detailedDataHoursEnabled', True)
+        info('Settings -> updateIntervalSecs: {}, detailedDataEnabled: {}, detailedIntervalSecs: {}, detailedDataHoursEnabled: {}, detailedDataSecondsEnabled: {}'.format(intervalSecs, detailedDataEnabled, detailedIntervalSecs, detailedHoursEnabled, detailedSecondsEnabled))
+        info('Settings -> historyDays: {}, maxHistoryDays: {}'.format(historyDays, maxHistoryDays))    
+        lagSecs = getConfigValue('lagSecs', 5)
+        accountTimeZoneName = getConfigValue('timezone', None)
+        accountTimeZone = pytz.timezone(accountTimeZoneName) if accountTimeZoneName is not None and accountTimeZoneName.upper() != "TZ" else None
+        info('Settings -> timezone: {}'.format(accountTimeZone))
+        detailedStartTime = startupTime
+        pastDay = datetime.datetime.now(accountTimeZone)
+        pastDay = pastDay.replace(hour=23, minute=59, second=59, microsecond=0)
+        historyrun = history
 
-            try:
-                deviceGids = list(account['deviceIdMap'].keys())
-                usages = account['vue'].get_device_list_usage(deviceGids, stopTime, scale=Scale.MINUTE.value, unit=Unit.KWH.value)
-                if usages is not None:
-                    for gid, device in usages.items():
-                        extractDataPoints(device, usageDataPoints)
+        while running:
+            usageDataPoints = []
+            now = datetime.datetime.now(datetime.UTC).replace(microsecond=0)
+            curDay = datetime.datetime.now(accountTimeZone)
+            stopTime = now - datetime.timedelta(seconds=lagSecs)
+            secondsSinceLastDetailCollection = (stopTime - detailedStartTime).total_seconds()
+            collectDetails = detailedDataEnabled and detailedIntervalSecs > 0 and secondsSinceLastDetailCollection >= detailedIntervalSecs
+            verbose('Starting next event collection; collectDetails={}; secondsSinceLastDetailCollection={}; detailedIntervalSecs={}'.format(collectDetails, secondsSinceLastDetailCollection, detailedIntervalSecs))
 
-                if collectDetails and detailedHoursEnabled:
-                    pastHour = stopTime - datetime.timedelta(hours=1)
-                    pastHour = pastHour.replace(minute=00, second=00,microsecond=0)
-                    verbose('Collecting previous hour: {} '.format(pastHour))
-                    historyStartTime = pastHour
-                    usages = account['vue'].get_device_list_usage(deviceGids, pastHour, scale=Scale.HOUR.value, unit=Unit.KWH.value)
+            for account in config['accounts']:
+                if 'vue' not in account:
+                    account['vue'] = PyEmVue()
+                    account['vue'].login(username=account['email'], password=account['password'])
+                    info('Login completed')
+                    populateDevices(account)
+
+                try:
+                    deviceGids = list(account['deviceIdMap'].keys())
+                    usages = account['vue'].get_device_list_usage(deviceGids, stopTime, scale=Scale.MINUTE.value, unit=Unit.KWH.value)
                     if usages is not None:
                         for gid, device in usages.items():
-                            extractDataPoints(device, usageDataPoints, tagValue_hour, historyStartTime)
+                            extractDataPoints(device, usageDataPoints)
 
-                if pastDay.day != curDay.day:
-                    usages = account['vue'].get_device_list_usage(deviceGids, pastDay, scale=Scale.DAY.value, unit=Unit.KWH.value)
-                    historyStartTime = pastDay.astimezone(pytz.UTC)
-                    verbose('Collecting previous day: {}Local - {}UTC,  '.format(pastDay, historyStartTime))
-                    if usages is not None:
-                        for gid, device in usages.items():
-                            extractDataPoints(device, usageDataPoints,tagValue_day, historyStartTime)
-                    pastDay = datetime.datetime.now(accountTimeZone)
-                    pastDay = pastDay.replace(hour=23, minute=59, second=59, microsecond=0)
+                    if collectDetails and detailedHoursEnabled:
+                        pastHour = stopTime - datetime.timedelta(hours=1)
+                        pastHour = pastHour.replace(minute=00, second=00,microsecond=0)
+                        verbose('Collecting previous hour: {} '.format(pastHour))
+                        historyStartTime = pastHour
+                        usages = account['vue'].get_device_list_usage(deviceGids, pastHour, scale=Scale.HOUR.value, unit=Unit.KWH.value)
+                        if usages is not None:
+                            for gid, device in usages.items():
+                                extractDataPoints(device, usageDataPoints, tagValue_hour, historyStartTime)
 
-                if history:
-                    stopTime = stopTime.astimezone(accountTimeZone)
-                    info('Loading historical data: {} day(s) ago'.format(historyDays))
-                    historyStartTime = stopTime - datetime.timedelta(historyDays)
-                    historyStartTime = historyStartTime.replace(hour=00, minute=00, second=00, microsecond=000000)
-                    while historyStartTime <= stopTime:
-                        historyEndTime = min(historyStartTime  + datetime.timedelta(20), stopTime)
-                        historyEndTime = historyEndTime.replace(hour=23, minute=59, second=59,microsecond=0)
-                        verbose('    {}  -  {}'.format(historyStartTime,historyEndTime))
-                        for gid, device in usages.items():
-                            extractDataPoints(device, usageDataPoints, 'History', historyStartTime, historyEndTime)
-                        if not running:
-                            break
-                        historyStartTime = historyEndTime + datetime.timedelta(1)
+                    if pastDay.day != curDay.day:
+                        usages = account['vue'].get_device_list_usage(deviceGids, pastDay, scale=Scale.DAY.value, unit=Unit.KWH.value)
+                        historyStartTime = pastDay.astimezone(pytz.UTC)
+                        verbose('Collecting previous day: {}Local - {}UTC,  '.format(pastDay, historyStartTime))
+                        if usages is not None:
+                            for gid, device in usages.items():
+                                extractDataPoints(device, usageDataPoints,tagValue_day, historyStartTime)
+                        pastDay = datetime.datetime.now(accountTimeZone)
+                        pastDay = pastDay.replace(hour=23, minute=59, second=59, microsecond=0)
+
+                    if history:
+                        stopTime = stopTime.astimezone(accountTimeZone)
+                        info('Loading historical data: {} day(s) ago'.format(historyDays))
+                        historyStartTime = stopTime - datetime.timedelta(historyDays)
                         historyStartTime = historyStartTime.replace(hour=00, minute=00, second=00, microsecond=000000)
-                        # Write to database after each historical batch to prevent timeout issues on large history intervals.
+                        while historyStartTime <= stopTime:
+                            historyEndTime = min(historyStartTime  + datetime.timedelta(20), stopTime)
+                            historyEndTime = historyEndTime.replace(hour=23, minute=59, second=59,microsecond=0)
+                            verbose('    {}  -  {}'.format(historyStartTime,historyEndTime))
+                            for gid, device in usages.items():
+                                extractDataPoints(device, usageDataPoints, 'History', historyStartTime, historyEndTime)
+                            if not running:
+                                break
+                            historyStartTime = historyEndTime + datetime.timedelta(1)
+                            historyStartTime = historyStartTime.replace(hour=00, minute=00, second=00, microsecond=000000)
+                            # Write to database after each historical batch to prevent timeout issues on large history intervals.
+                            info('Submitting datapoints to database; account="{}"; points={}'.format(account['name'], len(usageDataPoints)))
+                            dumpPoints("Sending to database", usageDataPoints)
+                            if args.dryrun:
+                                info('Dryrun mode enabled.  Skipping database write.')
+                            else:
+                                if influxVersion == 2:
+                                    write_api.write(bucket=bucket, record=usageDataPoints)
+                                else:
+                                    influx.write_points(usageDataPoints,batch_size=5000)
+                            usageDataPoints = []
+                            pauseEvent.wait(5)
+                        history = False
+
+                    if not running:
+                        break
+
+                    if not historyrun:
                         info('Submitting datapoints to database; account="{}"; points={}'.format(account['name'], len(usageDataPoints)))
                         dumpPoints("Sending to database", usageDataPoints)
                         if args.dryrun:
@@ -527,41 +574,27 @@ try:
                                 write_api.write(bucket=bucket, record=usageDataPoints)
                             else:
                                 influx.write_points(usageDataPoints,batch_size=5000)
-                        usageDataPoints = []
-                        pauseEvent.wait(5)
-                    history = False
 
-                if not running:
-                    break
+                    # Resuming logging of normal datapoints after history collection has completed.
+                    if not history and historyrun:
+                        historyrun = False
 
-                if not historyrun:
-                    info('Submitting datapoints to database; account="{}"; points={}'.format(account['name'], len(usageDataPoints)))
-                    dumpPoints("Sending to database", usageDataPoints)
-                    if args.dryrun:
-                        info('Dryrun mode enabled.  Skipping database write.')
-                    else:
-                        if influxVersion == 2:
-                            write_api.write(bucket=bucket, record=usageDataPoints)
-                        else:
-                            influx.write_points(usageDataPoints,batch_size=5000)
+                except:
+                    error('Failed to record new usage data: {}'.format(sys.exc_info()))
+                    traceback.print_exc()
 
-                # Resuming logging of normal datapoints after history collection has completed.
-                if not history and historyrun:
-                    historyrun = False
+            if collectDetails:
+                detailedStartTime = stopTime + datetime.timedelta(seconds=1)
+            pauseEvent.wait(intervalSecs)
 
-            except:
-                error('Failed to record new usage data: {}'.format(sys.exc_info()))
-                traceback.print_exc()
+        info('Finished')
+    except SystemExit as e:
+        #If sys.exit was 2, then normal syntax exit from help or bad command line, no error message
+        if e.code == 0 or e.code == 2:
+            quit(0)
+        else:
+            error('Fatal error: {}'.format(sys.exc_info()))
+            traceback.print_exc()
 
-        if collectDetails:
-            detailedStartTime = stopTime + datetime.timedelta(seconds=1)
-        pauseEvent.wait(intervalSecs)
-
-    info('Finished')
-except SystemExit as e:
-    #If sys.exit was 2, then normal syntax exit from help or bad command line, no error message
-    if e.code == 0 or e.code == 2:
-        quit(0)
-    else:
-        error('Fatal error: {}'.format(sys.exc_info()))
-        traceback.print_exc()
+if __name__ == "__main__":
+    main()
